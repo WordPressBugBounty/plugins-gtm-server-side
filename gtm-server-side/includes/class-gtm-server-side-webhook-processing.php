@@ -29,7 +29,7 @@ class GTM_Server_Side_Webhook_Processing {
 	}
 
 	/**
-	 * Order change status to processing (Order paid).
+	 * Order change status to processing.
 	 *
 	 * @param  int $order_id Order id.
 	 * @return void
@@ -50,6 +50,7 @@ class GTM_Server_Side_Webhook_Processing {
 
 		$request = array(
 			'event'     => 'order_paid',
+			'cart_hash' => $order->get_cart_hash(),
 			'ecommerce' => array(
 				'transaction_id' => esc_attr( $order->get_order_number() ),
 				'affiliation'    => '',
@@ -72,6 +73,14 @@ class GTM_Server_Side_Webhook_Processing {
 				$request['client_id'] = $request_cookies['_dcid'];
 			}
 		}
+
+		/**
+		 * Allows modification of processing order webhook payload.
+		 *
+		 * @param array  $request Webhook payload data.
+		 * @param object $order   WC_Order instance.
+		 */
+		$request = apply_filters( 'gtm_server_side_processing_webhook_payload', $request, $order );
 
 		GTM_Server_Side_Helpers::send_webhook_request( $request );
 	}
