@@ -3,7 +3,7 @@ Contributors: gtmserver,bukashk0zzz
 Tags: google tag manager, google tag manager server side, gtm, gtm server side, tag manager, tagmanager, analytics, google, serverside, server-side, gtag
 Requires at least: 5.2.0
 Tested up to: 6.8.0
-Stable tag: 2.1.29
+Stable tag: 2.1.30
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -38,15 +38,15 @@ Benefits of GTM Server Side plugin by stape.io:
 
 == Frequently Asked Questions ==
 
-= What is Google Tag Manager =
+= What is Google Tag Manager? =
 
 Please refer to the official <a href="https://marketingplatform.google.com/about/tag-manager/">Google Tag Manager Documentation</a>.
 
-= What is Google Tag Manager Server Side =
+= What is Google Tag Manager Server Side? =
 
 Please refer to the technical description of <a href="https://stape.io/blog/what-is-google-tag-manager-server-side-tracking">Google Tag Manager Server Side</a>.
 
-= Where I can get GTM Server Side url =
+= Where I can get GTM Server Side URL? =
 
 Please refer to blog post <a href="https://stape.io/blog/how-to-set-up-google-tag-manager-server-side-container">how to set up Google Tag Manager Server Side Container</a>.
 
@@ -54,7 +54,7 @@ Please refer to blog post <a href="https://stape.io/blog/how-to-set-up-google-ta
 
 Yes, please refer to the blog post on how to setup <a href="https://stape.io/blog/how-to-add-google-analytics-and-facebook-pixels-to-wordpress-using-google-tag-manager-server-container">server side Tagging For WordPress with WooCommerce</a>.
 
-= Can I integrate Facebook Conversion API with Google Tag Manager server side =
+= Can I integrate Facebook Conversion API with Google Tag Manager server side? =
 
 Yes. <a href="https://stape.io/blog/how-to-set-up-facebook-conversion-api">How to Setup Facebook Conversion API</a>.
 
@@ -66,6 +66,9 @@ Yes. <a href="https://stape.io/blog/how-to-set-up-facebook-conversion-api">How t
 4. Menu item in the settings panel.
 
 == Changelog ==
+
+= 2.1.30 =
+* Added discount for order item
 
 = 2.1.29 =
 * Tested up to WordPress 6.8.0
