@@ -4,8 +4,9 @@
  *
  * Registers a WordPress rewrite rule so that requests to the configured
  * path are transparently forwarded to the Stape sGTM container endpoint.
- * Relies entirely on WordPress's native rewrite system — no REQUEST_URI
- * string parsing.
+ * The sub-path comes from WordPress's native rewrite system; REQUEST_URI is
+ * read only to restore a trailing slash, which WordPress trims before
+ * matching rewrite rules.
  *
  * @package    GTM_Server_Side
  * @subpackage GTM_Server_Side/includes
@@ -118,14 +119,15 @@ class GTM_Server_Side_Same_Origin_Proxy {
 	);
 
 	/**
-	 * Security response headers deliberately stripped from the upstream reply.
+	 * Security response headers the proxy sets itself instead of passing on
+	 * the upstream's values. The service worker iframe is framed by the site's
+	 * own pages, so framing stays allowed for the same origin only.
 	 *
-	 * @var string[]
+	 * @var array<string,string>
 	 */
-	private static $stripped_security_response = array(
-		'x-frame-options',
-		'x-content-type-options',
-		'referrer-policy',
+	private static $security_response = array(
+		'x-frame-options'        => 'SAMEORIGIN',
+		'x-content-type-options' => 'nosniff',
 	);
 
 	/**
@@ -278,8 +280,25 @@ class GTM_Server_Side_Same_Origin_Proxy {
 			exit;
 		}
 
-		// Sub-path captured by the rewrite rule, e.g. '/collect' or ''.
-		$sub_path                 = (string) get_query_var( self::PATH_VAR );
+		// Sub-path captured by the rewrite rule, e.g. '/collect' or ''. It is
+		// also a public query var, so it can arrive straight from the query
+		// string and must not be trusted.
+		$sub_path = (string) get_query_var( self::PATH_VAR );
+		if ( ! $this->is_valid_sub_path( $sub_path ) ) {
+			status_header( 400 );
+			exit;
+		}
+
+		// WP::parse_request() trims slashes off the request path before matching
+		// rewrite rules, so the captured sub-path never ends with one. Restore it
+		// from the original request: upstream, '/fps/<id>/' and '/fps/<id>' are
+		// different URLs.
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		$request_path = (string) wp_parse_url( isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '', PHP_URL_PATH );
+		if ( '/' === substr( $request_path, -1 ) && '/' !== substr( $sub_path, -1 ) ) {
+			$sub_path .= '/';
+		}
+
 		$is_custom_loader_load    = (bool) preg_match( '/\.load$/i', $sub_path );
 		$is_service_worker_iframe = (bool) preg_match( '#/_/service_worker/[^/]+/sw_iframe\.html$#i', $sub_path );
 		$upstream_path         = $is_custom_loader_load
@@ -294,7 +313,12 @@ class GTM_Server_Side_Same_Origin_Proxy {
 			$url .= '?' . $qs;
 		}
 
-		$response = wp_remote_request(
+		if ( ! $this->is_upstream_url( $url, $endpoint ) ) {
+			status_header( 400 );
+			exit;
+		}
+
+		$response = wp_safe_remote_request(
 			$url,
 			array(
 				'method'      => $this->get_request_method(),
@@ -336,6 +360,54 @@ class GTM_Server_Side_Same_Origin_Proxy {
 		// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 		echo $body;
 		exit;
+	}
+
+	/**
+	 * Whether a sub-path is safe to append to the container endpoint.
+	 *
+	 * The rewrite rule only ever captures '' or a path starting with '/'.
+	 * Anything that could move the request off the endpoint's host or out of
+	 * its path (userinfo, backslashes, empty or dot segments) is rejected.
+	 *
+	 * @param  string $sub_path Sub-path after the proxy prefix.
+	 * @return bool
+	 */
+	private function is_valid_sub_path( $sub_path ) {
+		if ( '' === $sub_path ) {
+			return true;
+		}
+
+		if ( '/' !== $sub_path[0] ) {
+			return false;
+		}
+
+		if ( preg_match( '#[@\\\\?\#\s\x00-\x1f\x7f]|//#', $sub_path ) ) {
+			return false;
+		}
+
+		return ! preg_match( '#/\.\.?(/|$)#', $sub_path );
+	}
+
+	/**
+	 * Whether the assembled upstream URL still points at the container
+	 * endpoint: same scheme and host, no userinfo and no port.
+	 *
+	 * @param  string $url      Assembled upstream URL.
+	 * @param  string $endpoint Container endpoint.
+	 * @return bool
+	 */
+	private function is_upstream_url( $url, $endpoint ) {
+		$target = wp_parse_url( $url );
+		$base   = wp_parse_url( $endpoint );
+
+		if ( ! is_array( $target ) || ! is_array( $base )
+			|| ! isset( $target['scheme'], $target['host'], $base['scheme'], $base['host'] )
+			|| isset( $target['user'] ) || isset( $target['pass'] ) || isset( $target['port'] ) ) {
+			return false;
+		}
+
+		return strtolower( $target['scheme'] ) === strtolower( $base['scheme'] )
+			&& strtolower( $target['host'] ) === strtolower( $base['host'] );
 	}
 
 	/**
@@ -528,7 +600,8 @@ class GTM_Server_Side_Same_Origin_Proxy {
 	}
 
 	/**
-	 * Forward response headers to the browser, stripping hop-by-hop ones.
+	 * Forward response headers to the browser, stripping hop-by-hop ones and
+	 * replacing the upstream's security headers with the proxy's own.
 	 *
 	 * @param  \Requests_Utility_CaseInsensitiveDictionary|array $headers Response headers object.
 	 * @return void
@@ -539,7 +612,7 @@ class GTM_Server_Side_Same_Origin_Proxy {
 		foreach ( $headers as $key => $value ) {
 			$lower = strtolower( $key );
 			if ( in_array( $lower, self::$hop_by_hop_response, true )
-				|| in_array( $lower, self::$stripped_security_response, true ) ) {
+				|| isset( self::$security_response[ $lower ] ) ) {
 				continue;
 			}
 
@@ -556,6 +629,10 @@ class GTM_Server_Side_Same_Origin_Proxy {
 				// headers such as Set-Cookie are forwarded in full.
 				header( $key . ': ' . $v, false );
 			}
+		}
+
+		foreach ( self::$security_response as $key => $value ) {
+			header( $key . ': ' . $value, true );
 		}
 	}
 
