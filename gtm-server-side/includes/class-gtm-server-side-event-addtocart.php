@@ -40,6 +40,30 @@ class GTM_Server_Side_Event_AddToCart {
 	const SESSION_ITEMS_MAX_AGE = 300;
 
 	/**
+	 * Cookie carrying the token of the request that stashed the last items.
+	 *
+	 * Some themes, such as Blocksy, post the product form over AJAX to the
+	 * product URL itself. That request looks like a page load here, so its items
+	 * are stashed, while assets/js/javascript.js pushes the same add on
+	 * added_to_cart. The script deletes this cookie when it pushes, and the
+	 * stashed items are only rendered while their token is still in it. An add
+	 * whose push never happened, because the shopper left first, keeps the
+	 * cookie and is still rendered on the next page.
+	 *
+	 * Keep in sync with ADD_TO_CART_TOKEN_COOKIE in assets/js/javascript.js.
+	 *
+	 * @var string
+	 */
+	const TOKEN_COOKIE = 'gtm_server_side_add_to_cart';
+
+	/**
+	 * Token of the items stashed by the current request.
+	 *
+	 * @var string|null
+	 */
+	private $request_token = null;
+
+	/**
 	 * Init.
 	 *
 	 * @return void
@@ -53,6 +77,7 @@ class GTM_Server_Side_Event_AddToCart {
 		add_action( 'wp_footer', array( $this, 'wp_footer' ) );
 
 		add_filter( 'woocommerce_cart_item_remove_link', array( $this, 'woocommerce_cart_item_remove_link' ), 10, 2 );
+		add_action( 'woocommerce_blocks_loaded', array( $this, 'register_cart_item_endpoint_data' ) );
 		add_filter( 'woocommerce_loop_add_to_cart_args', array( $this, 'woocommerce_loop_add_to_cart_args' ), 10, 2 );
 		add_filter( 'woocommerce_blocks_product_grid_item_html', array( $this, 'woocommerce_blocks_product_grid_item_html' ), 10, 3 );
 		add_action( 'woocommerce_after_add_to_cart_button', array( $this, 'woocommerce_after_add_to_cart_button' ) );
@@ -98,9 +123,44 @@ class GTM_Server_Side_Event_AddToCart {
 			'quantity'     => max( 1, (int) $quantity ),
 			'variation'    => $this->sanitize_variation( $variation ),
 			'time'         => time(),
+			'token'        => $this->get_request_token(),
 		);
 
 		WC()->session->set( self::SESSION_ITEMS_KEY, $items );
+	}
+
+	/**
+	 * Return the token of the current request, setting its cookie on first use.
+	 *
+	 * A grouped product adds every child in one request, so they share a token.
+	 * If the cookie can no longer be sent, the items are stashed without a
+	 * token and rendered unconditionally, as before the cookie existed.
+	 *
+	 * @return string
+	 */
+	private function get_request_token() {
+		if ( null !== $this->request_token ) {
+			return $this->request_token;
+		}
+
+		$this->request_token = '';
+		if ( headers_sent() ) {
+			return $this->request_token;
+		}
+
+		$this->request_token = wp_generate_password( 16, false );
+
+		GTM_Server_Side_Helpers::set_cookie(
+			array(
+				'name'    => self::TOKEN_COOKIE,
+				'value'   => $this->request_token,
+				'expires' => time() + self::SESSION_ITEMS_MAX_AGE,
+				'domain'  => '',
+				'secure'  => is_ssl(),
+			)
+		);
+
+		return $this->request_token;
 	}
 
 	/**
@@ -121,6 +181,7 @@ class GTM_Server_Side_Event_AddToCart {
 		WC()->session->__unset( self::SESSION_ITEMS_KEY );
 
 		$items = $this->drop_expired_items( $items );
+		$items = $this->drop_pushed_items( $items );
 		if ( empty( $items ) ) {
 			return;
 		}
@@ -152,12 +213,7 @@ class GTM_Server_Side_Event_AddToCart {
 		if ( GTM_Server_Side_WC_Helpers::instance()->is_enable_user_data() ) {
 			$data_layer['user_data'] = GTM_Server_Side_WC_Helpers::instance()->get_data_layer_user_data();
 		}
-		?>
-		<script type="text/javascript">
-			dataLayer.push( { ecommerce: null } );
-			dataLayer.push(<?php echo GTM_Server_Side_Helpers::array_to_json( $data_layer ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>);
-		</script>
-		<?php
+		GTM_Server_Side_Helpers::print_data_layer_event( $data_layer );
 	}
 
 	/**
@@ -210,6 +266,32 @@ class GTM_Server_Side_Event_AddToCart {
 	}
 
 	/**
+	 * Drop stashed items the browser already pushed. See TOKEN_COOKIE.
+	 *
+	 * The current request's own token counts as not pushed: a form post that
+	 * renders the page itself has not sent its cookie back yet.
+	 *
+	 * @param  array $items Stashed items.
+	 * @return array
+	 */
+	private function drop_pushed_items( $items ) {
+		$cookie = isset( $_COOKIE[ self::TOKEN_COOKIE ] ) ? sanitize_text_field( wp_unslash( $_COOKIE[ self::TOKEN_COOKIE ] ) ) : '';
+		$result = array();
+
+		foreach ( $items as $item ) {
+			$token = isset( $item['token'] ) ? (string) $item['token'] : '';
+
+			if ( '' !== $token && $token !== $cookie && $token !== $this->request_token ) {
+				continue;
+			}
+
+			$result[] = $item;
+		}
+
+		return $result;
+	}
+
+	/**
 	 * Return data layer items for the stashed products.
 	 *
 	 * @param  array $items Stashed items.
@@ -231,14 +313,10 @@ class GTM_Server_Side_Event_AddToCart {
 				continue;
 			}
 
-			$array             = GTM_Server_Side_WC_Helpers::instance()->get_data_layer_item( $product );
+			$variation         = isset( $item['variation'] ) && is_array( $item['variation'] ) ? $item['variation'] : array();
+			$array             = GTM_Server_Side_WC_Helpers::instance()->get_data_layer_item( $product, array( 'variation' => $variation ) );
 			$array['quantity'] = isset( $item['quantity'] ) ? intval( $item['quantity'] ) : 1;
 			$array['index']    = $index++;
-
-			$item_variant = $this->get_item_variant( $product, isset( $item['variation'] ) ? $item['variation'] : array() );
-			if ( '' !== $item_variant ) {
-				$array['item_variant'] = $item_variant;
-			}
 
 			$result[] = $array;
 		}
@@ -272,42 +350,6 @@ class GTM_Server_Side_Event_AddToCart {
 	}
 
 	/**
-	 * Return the variant label for a stashed product.
-	 *
-	 * A variation's own attributes are empty for an "Any …" attribute, so the
-	 * value the shopper chose is taken from the attributes the add-to-cart
-	 * request carried instead.
-	 *
-	 * @param  WC_Product $product Added product.
-	 * @param  array      $variation Chosen variation attributes.
-	 * @return string
-	 */
-	private function get_item_variant( $product, $variation ) {
-		if ( 'variation' !== $product->get_type() ) {
-			return '';
-		}
-
-		$variation  = is_array( $variation ) ? $variation : array();
-		$attributes = array();
-
-		foreach ( $product->get_variation_attributes() as $key => $value ) {
-			if ( '' === $value || null === $value ) {
-				$value = isset( $variation[ $key ] ) ? $variation[ $key ] : '';
-			}
-
-			if ( '' === $value ) {
-				continue;
-			}
-
-			$attributes[ $key ] = $value;
-		}
-
-		$labels = GTM_Server_Side_WC_Helpers::instance()->get_variation_attribute_labels( $attributes );
-
-		return implode( ',', $labels );
-	}
-
-	/**
 	 * Hook: woocommerce_cart_item_remove_link.
 	 *
 	 * @param  string $link Html link.
@@ -328,6 +370,61 @@ class GTM_Server_Side_Event_AddToCart {
 		$link             = str_replace( '<a ', '<a ' . join( ' ', $attrs ), $link );
 
 		return $link;
+	}
+
+	/**
+	 * Hook: woocommerce_blocks_loaded.
+	 *
+	 * The Cart and Mini-Cart blocks render their lines in React, with no remove
+	 * link to carry the data attributes, so each Store API cart item carries the
+	 * item data instead. assets/js/javascript.js reads it in the blocks' remove
+	 * and quantity actions.
+	 *
+	 * @return void
+	 */
+	public function register_cart_item_endpoint_data() {
+		if ( ! function_exists( 'woocommerce_store_api_register_endpoint_data' ) ) {
+			return;
+		}
+
+		woocommerce_store_api_register_endpoint_data(
+			array(
+				'endpoint'        => \Automattic\WooCommerce\StoreApi\Schemas\V1\CartItemSchema::IDENTIFIER,
+				'namespace'       => 'gtm_server_side',
+				'data_callback'   => array( $this, 'get_cart_item_endpoint_data' ),
+				'schema_callback' => array( $this, 'get_cart_item_endpoint_schema' ),
+				'schema_type'     => ARRAY_A,
+			)
+		);
+	}
+
+	/**
+	 * Store API cart item data: the item as the classic remove link carries it.
+	 *
+	 * @param  array $cart_item Cart item.
+	 * @return array
+	 */
+	public function get_cart_item_endpoint_data( $cart_item ) {
+		$data = $this->get_item( isset( $cart_item['data'] ) ? $cart_item['data'] : null );
+		$data = apply_filters( 'gtm_server_side_before_html_data_attributes', $data, 'remove_from_cart', 'woocommerce_store_api_cart_item' );
+
+		return array( 'item' => $data );
+	}
+
+	/**
+	 * Store API cart item data schema.
+	 *
+	 * @return array
+	 */
+	public function get_cart_item_endpoint_schema() {
+		return array(
+			'item' => array(
+				'description' => __( 'The cart item as the GTM Server Side data layer reports it.', 'gtm-server-side' ),
+				'type'        => 'object',
+				'context'     => array( 'view', 'edit' ),
+				'readonly'    => true,
+			),
+		);
 	}
 
 	/**
